@@ -94,6 +94,7 @@ void loop() {
   RUN_TEST(test_txrx, 0);
   // We run test_txrx again since we're going to try using BCM pin numbers on the Rapsberry Pi
   RUN_TEST(test_txrx, 0);
+  RUN_TEST(test_rapid_fire, 0);
 #if defined(RF69_LISTENMODE_ENABLE)
   RUN_TEST(test_listenModeSendBurst, 0);
 #endif
@@ -174,7 +175,7 @@ bool test_receive(String& failureReason) {
 bool test_txrx(String& failureReason) {
   while (!radio.receiveDone()) delay(1);
   getMessage(data, datalen);
-  delay(200);
+  delay(50);
   if (radio.ACKRequested()) radio.sendACK(radio.SENDERID);
   char* response = new char[datalen];
   for (uint8_t i = 0; i < datalen; i++) {
@@ -187,6 +188,30 @@ bool test_txrx(String& failureReason) {
     failureReason = String("No ack to our message");
   }
   delete response;
+
+  return result;
+}
+
+bool test_rapid_fire(String& failureReason) {
+  bool result = true;
+  char last_message[12] = {'l', 'a', 's', 't', ' ', 'm', 'e', 's', 's', 'a', 'g', 'e'};
+  while(strncmp(data, last_message, 12) != 0) {
+    while (!radio.receiveDone()) delay(1);
+    getMessage(data, datalen);
+    if (radio.ACKRequested()) radio.sendACK(radio.SENDERID);
+    char* response = new char[datalen];
+    for (uint8_t i = 0; i < datalen; i++) {
+      response[i] = data[datalen - i - 1];
+    }
+    Serial.println("Replying with '" + bufferToString(response, datalen) + "' (length " + String(datalen, DEC) + ")...");
+    result &= radio.sendWithRetry(1, response, datalen, 5, 1000);
+    if (!result) {
+      Serial.println(String("No ack to message"));
+      failureReason = String("No ack to our message");
+    }
+    delete response;
+
+  }
 
   return result;
 }
@@ -259,7 +284,8 @@ String bufferToString(char* data, uint8_t datalen) {
   for (uint8_t i = 0; i < datalen; i++) all_ascii &= isAscii(data[i]);
 
   for (uint8_t i = 0; i < datalen; i++) {
-    result += all_ascii ? String((char)data[i]) : (String(data[i] < 16 ? "0" : "") + String((uint8_t)data[i], HEX) + String(" "));
+//    result += all_ascii ? String((char)data[i]) : (String(data[i] < 16 ? "0" : "") + String((uint8_t)data[i], HEX) + String(" "));
+    result += all_ascii ? String((char)data[i]) : (String((uint8_t)data[i]) + String(" "));
   }
 
   return result;

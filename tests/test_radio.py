@@ -3,13 +3,15 @@
 import time
 import random
 import pytest
+import logging
 import RPi.GPIO as GPIO # pylint: disable=consider-using-from-import
-from test_config import *
+#from test_config import *
+from tests.test_config import *
 from RFM69 import Radio, RF69_MAX_DATA_LEN
 
 
 def test_transmit():
-    with Radio(FREQUENCY, 1, 99, verbose=True, interruptPin=INTERRUPT_PIN, resetPin=RESET_PIN, spiDevice=SPI_DEVICE, isHighPower=IS_HIGH_POWER, encryptionKey="sampleEncryptKey") as radio:
+    with Radio(FREQUENCY, 1, 99, logLevel=logging.DEBUG, interruptPin=INTERRUPT_PIN, resetPin=RESET_PIN, spiDevice=SPI_DEVICE, isHighPower=IS_HIGH_POWER, encryptionKey="sampleEncryptKey") as radio:
         # Test setting the network ID to the value we'll actually test with
         radio.set_network(100)
         # Try sending to a node that isn't on, and don't require an ack
@@ -22,7 +24,7 @@ def test_transmit():
         assert success is True
 
 def test_receive():
-    with Radio(FREQUENCY, 1, 100, verbose=True, interruptPin=INTERRUPT_PIN, resetPin=RESET_PIN, spiDevice=SPI_DEVICE, isHighPower=IS_HIGH_POWER, encryptionKey="sampleEncryptKey") as radio:
+    with Radio(FREQUENCY, 1, 100, logLevel=logging.DEBUG, interruptPin=INTERRUPT_PIN, resetPin=RESET_PIN, spiDevice=SPI_DEVICE, isHighPower=IS_HIGH_POWER, encryptionKey="sampleEncryptKey") as radio:
         timeout = time.time() + 5
         while time.time() < timeout:
             if radio.num_packets() > 0:
@@ -35,7 +37,7 @@ def test_receive():
 
 def do_txrx_test(radio):
     test_message = [random.randint(0, 255) for i in range(RF69_MAX_DATA_LEN)]
-    success = radio.send(2, test_message, attempts=5, waitTime=100)
+    success = radio.send(2, test_message, attempts=5, waitTime=300)
     assert success is True
     timeout = time.time() + 5
     while (not radio.has_received_packet()) and (time.time() < timeout):
@@ -43,10 +45,10 @@ def do_txrx_test(radio):
     assert radio.has_received_packet()
     packets = radio.get_packets()
     assert packets[0].data == list(reversed(test_message))
-    time.sleep(1.0)
+    time.sleep(0.3)
 
 def test_txrx():
-    with Radio(FREQUENCY, 1, 100, verbose=True, interruptPin=INTERRUPT_PIN, resetPin=RESET_PIN, spiDevice=SPI_DEVICE, isHighPower=IS_HIGH_POWER, encryptionKey="sampleEncryptKey") as radio:
+    with Radio(FREQUENCY, 1, 100, logLevel=logging.DEBUG, interruptPin=INTERRUPT_PIN, resetPin=RESET_PIN, spiDevice=SPI_DEVICE, isHighPower=IS_HIGH_POWER, encryptionKey="sampleEncryptKey") as radio:
         do_txrx_test(radio)
 
 def test_bcm_pin_numbers():
@@ -56,15 +58,35 @@ def test_bcm_pin_numbers():
     GPIO.cleanup()
     # The format of this dict is (Raspberry Pi pin number: GPIO number)
     board_to_bcm_map = {3: 2, 5: 3, 7: 4, 8: 14, 10: 15, 11: 17, 12: 18, 13: 27, 15: 22, 16: 23, 18: 24, 19: 10, 21: 9, 22: 25, 23: 11, 24: 8, 26: 7, 27: 0, 28: 1, 29: 5, 31: 6, 32: 12, 33: 13, 35: 19, 36: 16, 37: 26, 38: 20, 40: 21}
-    with Radio(FREQUENCY, 1, 100, verbose=True, use_board_pin_numbers=False, interruptPin=board_to_bcm_map[INTERRUPT_PIN], resetPin=board_to_bcm_map[RESET_PIN], spiDevice=SPI_DEVICE, isHighPower=IS_HIGH_POWER, encryptionKey="sampleEncryptKey") as radio:
+    with Radio(FREQUENCY, 1, 100, logLevel=logging.DEBUG, use_board_pin_numbers=False, interruptPin=board_to_bcm_map[INTERRUPT_PIN], resetPin=board_to_bcm_map[RESET_PIN], spiDevice=SPI_DEVICE, isHighPower=IS_HIGH_POWER, encryptionKey="sampleEncryptKey") as radio:
         do_txrx_test(radio)
     # Since we used BCM pin numbers, we have to clean up all of GPIO again
     GPIO.cleanup()
 
+def test_rapid_fire():
+    with Radio(FREQUENCY, 1, 100, logLevel=logging.ERROR, interruptPin=INTERRUPT_PIN, resetPin=RESET_PIN, spiDevice=SPI_DEVICE, isHighPower=IS_HIGH_POWER, encryptionKey="sampleEncryptKey") as radio:
+        time.sleep(1.0) # Wait for the other node to get ready to receive
+        num_messages = 100
+        test_messages = [[random.randint(0, 255) for i in range(RF69_MAX_DATA_LEN)] for _ in range(num_messages)]
+        test_messages[-1] = [ord(x) for x in "last message"]
+        sent_messages = [False for _ in range(num_messages)]
+        received_messages = [False for _ in range(num_messages)]
+        for i in range(num_messages):
+            sent_messages[i] = radio.send(2, test_messages[i], attempts=5, waitTime=300)
+            radio.begin_receive()
+        print("Sent messages: {}".format(sent_messages))
+        assert all(sent_messages)
+        time.sleep(num_messages/10)
+        packets = radio.get_packets()
+        for packet in packets:
+            received_messages[test_messages.index(list(reversed(packet.data)))] = True
+        print("Received {} messages: {}".format(len(packets), received_messages))
+        assert all(received_messages)
+
 def test_listen_mode_send_burst():
     try:
         TEST_LISTEN_MODE_SEND_BURST
-        with Radio(FREQUENCY, 1, 100, verbose=True, interruptPin=INTERRUPT_PIN, resetPin=RESET_PIN, spiDevice=SPI_DEVICE, isHighPower=IS_HIGH_POWER, encryptionKey="sampleEncryptKey") as radio:
+        with Radio(FREQUENCY, 1, 100, logLevel=logging.DEBUG, interruptPin=INTERRUPT_PIN, resetPin=RESET_PIN, spiDevice=SPI_DEVICE, isHighPower=IS_HIGH_POWER, encryptionKey="sampleEncryptKey") as radio:
             # For more test coverage, let's try setting the listen mode durations outside the acceptable range, like 70 seconds
             radio.listen_mode_set_durations(256, 70000000)
             radio.listen_mode_set_durations(70000000, 1000400)
@@ -84,7 +106,7 @@ def test_listen_mode_send_burst():
         pytest.skip("Skipping testing listen_mode_send_burst since it's not set up")
 
 def test_general():
-    with Radio(FREQUENCY, 1, 100, verbose=True, interruptPin=INTERRUPT_PIN, resetPin=RESET_PIN, spiDevice=SPI_DEVICE, isHighPower=IS_HIGH_POWER, encryptionKey="sampleEncryptKey") as radio:
+    with Radio(FREQUENCY, 1, 100, logLevel=logging.DEBUG, interruptPin=INTERRUPT_PIN, resetPin=RESET_PIN, spiDevice=SPI_DEVICE, isHighPower=IS_HIGH_POWER, encryptionKey="sampleEncryptKey") as radio:
         # This is just here for test coverage
         radio._readRSSI(True)
         radio.read_registers()
@@ -95,3 +117,4 @@ def test_general():
         radio._setMode(1)
         assert radio._canSend() is True
         radio._setMode(2)
+

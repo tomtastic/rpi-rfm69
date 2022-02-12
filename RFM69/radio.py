@@ -2,6 +2,8 @@ import time
 import logging
 import threading
 import warnings
+import inspect
+import random
 
 import spidev
 import RPi.GPIO as GPIO # pylint: disable=consider-using-from-import
@@ -24,6 +26,7 @@ class Radio:
         networkID (int): The network ID
 
     Keyword Args:
+        logLevel (int): The log level to use from the logging module
         auto_acknowledge (bool): Automatically send acknowledgements
         isHighPower (bool): Is this a high power radio model
         power (int): Power level - a percentage in range 10 to 100.
@@ -37,10 +40,65 @@ class Radio:
         verbose (bool): Verbose mode - Activates logging to console.
     """
 
+    class DebugLock:
+        def __init__(self, lock, name, logger):
+            self._lock = lock
+            self._name = name
+            self._logger = logger
+
+        def __enter__(self):
+            caller = inspect.stack()[1]
+            self._logger.debug("Acquiring {} in {}:{}:{}".format(self._name, caller.filename, caller.lineno, caller.function))
+            self._lock.acquire()
+            
+        def __exit__(self, *args):
+            caller = inspect.stack()[1]
+            self._logger.debug("Releasing {} in {}:{}:{}".format(self._name, caller.filename, caller.lineno, caller.function))
+            self._lock.release()
+            
+        def acquire(self):
+            caller = inspect.stack()[1]
+            self._logger.debug("Acquiring {} in {}:{}:{}".format(self._name, caller.filename, caller.lineno, caller.function))
+            self._lock.acquire()
+
+        def release(self):
+            caller = inspect.stack()[1]
+            self._logger.debug("Releasing {} in {}:{}:{}".format(self._name, caller.filename, caller.lineno, caller.function))
+            self._lock.release()
+
+        def wait(self, timeout=None):
+            caller = inspect.stack()[1]
+            self._logger.debug("Waiting on {} for {} in {}:{}:{}".format(self._name, timeout, caller.filename, caller.lineno, caller.function))
+            self._lock.wait(timeout)
+
+        def wait_for(self, predicate, timeout=None):
+            caller = inspect.stack()[1]
+            self._logger.debug("Waiting for {} for {} in {}:{}:{}".format(self._name, timeout, caller.filename, caller.lineno, caller.function))
+            self._lock.wait_for(predicate, timeout)
+
+        def notify_all(self):
+            caller = inspect.stack()[1]
+            self._logger.debug("Notifying threads waiting on {} in {}:{}:{}".format(self._name, caller.filename, caller.lineno, caller.function))
+            self._lock.notify_all()
+            
     def __init__(self, freqBand, nodeID, networkID=100, **kwargs):
-        self.logger = None
+        self.logger = kwargs.get("logger", None)
+        if self.logger is None:
+            self.logger = logging.getLogger(__name__)
+            self.handler = logging.StreamHandler()
+            self.handler.setLevel(logging.ERROR)
+            formatter = logging.Formatter('%(asctime)s %(thread)d %(filename)s:%(lineno)d:%(funcName)s[%(levelname)s]: %(message)s')
+            self.handler.setFormatter(formatter)
+            self.logger.addHandler(self.handler)
+            self.logger.propagate = False
+
+        log_level = kwargs.get("logLevel", logging.ERROR)
+        self.logger.setLevel(log_level)
+        self.handler.setLevel(log_level)
+
         if kwargs.get('verbose', False):
-            self.logger = self._init_log()
+            self.logger.setLevel(logging.DEBUG)
+            self.handler.setLevel(logging.DEBUG)
 
         self.auto_acknowledge = kwargs.get('autoAcknowledge', True)
         self.isRFM69HW = kwargs.get('isHighPower', True)
@@ -57,7 +115,13 @@ class Radio:
         self._intLock = threading.Lock()
         self._ackLock = threading.Condition()
         self._modeLock = threading.RLock()
+        # self._spiLock = Radio.DebugLock(threading.Lock(), "spiLock", self.logger)
+        # self._sendLock = Radio.DebugLock(threading.Condition(), "sendLock", self.logger)
+        # self._intLock = Radio.DebugLock(threading.Lock(), "intLock", self.logger)
+        # self._ackLock = Radio.DebugLock(threading.Condition(), "ackLock", self.logger)
+        # self._modeLock = Radio.DebugLock(threading.RLock(), "modeLock", self.logger)
 
+        
         self.mode = ""
         self.mode_name = ""
 
@@ -70,10 +134,10 @@ class Radio:
         self.listen_mode_set_durations(DEFAULT_LISTEN_RX_US, DEFAULT_LISTEN_IDLE_US)
 
         self._packets = []
-        self._packetLock = threading.Condition()
-        # self._packetQueue = queue.Queue()
+        # self._packetLock = threading.Condition()
+        self._packetLock = Radio.DebugLock(threading.Condition(), "packetLock", self.logger)
         self.acks = {}
-
+        
         self._init_spi()
         self._init_gpio()
         self._initialize(freqBand, nodeID, networkID)
@@ -237,13 +301,15 @@ class Radio:
             bool: If acknowledgement received or None is no acknowledgement requested
         """
         attempts = kwargs.get('attempts', 3)
-        wait_time = kwargs.get('wait', 50)
+        wait_time = kwargs.get('waitTime', 50)
         require_ack = kwargs.get('require_ack', True)
         if attempts > 1:
             require_ack = True
 
+        self.logger.info("Sending message of length {} to {} with {} attempts and wait_time of {}, require_ack={}".format(len(buff), toAddress, attempts, wait_time, require_ack))
         for _ in range(0, attempts):
-            self._send(toAddress, buff, attempts > 1)
+            self.logger.debug("Sending {} try {}".format(buff, _))
+            self._send(toAddress, buff, require_ack)
 
             if not require_ack:
                 return None
@@ -253,6 +319,7 @@ class Radio:
                     return True
 
         return False
+
 
     def read_temperature(self, calFactor=0):
         """Read the temperature of the radios CMOS chip.
@@ -294,14 +361,18 @@ class Radio:
 
     def begin_receive(self):
         """Begin listening for packets"""
+        rand = random.randint(0, 9999999999999999)
+        self.logger.debug("Acquiring intLock {}".format(rand))
         with self._intLock:
+            self.logger.debug("intLock {} acquired".format(rand))
             if self._readReg(REG_IRQFLAGS2) & RF_IRQFLAGS2_PAYLOADREADY:
                 # avoid RX deadlocks
                 self._writeReg(REG_PACKETCONFIG2, (self._readReg(REG_PACKETCONFIG2) & 0xFB) | RF_PACKET2_RXRESTART)
             #set DIO0 to "PAYLOADREADY" in receive mode
             self._writeReg(REG_DIOMAPPING1, RF_DIOMAPPING1_DIO0_01)
             self._setMode(RF69_MODE_RX)
-
+        self.logger.debug("intlock {} released".format(rand))
+            
     def has_received_packet(self):
         """Check if packet received
 
@@ -338,8 +409,11 @@ class Radio:
             toAddress (int): Recipient node's ID
 
         """
+        self.logger.debug("")
         while not self._canSend():
+            self.logger.debug("Mode is {}".format(self.mode))
             pass #self.has_received_packet()
+        self.logger.debug("Clear to send ack")
         self._sendFrame(toAddress, buff, False, True)
 
 
@@ -427,22 +501,28 @@ class Radio:
         self._writeReg(REG_NODEADRS, self.address)
 
     def _canSend(self):
+        self.logger.debug("Mode is {}".format(self.mode))
         if self.mode == RF69_MODE_STANDBY:
-            self.begin_receive()
+#            self.begin_receive()
+            self.logger.debug("")
             return True
         #if signal stronger than -100dBm is detected assume channel activity - removed self.PAYLOADLEN == 0 and
         elif self.mode == RF69_MODE_RX and self._readRSSI() < CSMA_LIMIT:
             self._setMode(RF69_MODE_STANDBY)
+            self.logger.debug("")
             return True
         return False
 
     def _ACKReceived(self, fromNodeID):
         if fromNodeID in self.acks:
+            self.logger.debug("found an ack from {} in {}".format(fromNodeID, self.acks))
             self.acks.pop(fromNodeID, None)
             return True
+        self.logger.debug("couldn't find an ack from {} in {}".format(fromNodeID, self.acks))
         return False
 
     def _sendFrame(self, toAddress, buff, requestACK, sendACK):
+        self.logger.debug("Sending frame length {} to {}".format(len(buff), toAddress))
         #turn off receiver to prevent reception while filling fifo
         self._setMode(RF69_MODE_STANDBY)
         #wait for modeReady
@@ -468,6 +548,7 @@ class Radio:
         with self._sendLock:
             self._setMode(RF69_MODE_TX)
             self._sendLock.wait(1.0)
+        #self.begin_receive()
         self._setMode(RF69_MODE_RX)
 
     def _readRSSI(self, forceTrigger=False):
@@ -533,7 +614,10 @@ class Radio:
         self._intLock.acquire()
         self._spiLock.acquire()
         self.spi.close()
-
+        if self.logger is not None:
+            while self.logger.hasHandlers():
+                self.logger.removeHandler(self.logger.handlers[0])
+            
     def __str__(self): # pragma: no cover
         return "Radio RFM69"
 
@@ -542,8 +626,8 @@ class Radio:
 
     # pylint: disable=no-self-use
     def _init_log(self):
-        logging.basicConfig(level=logging.DEBUG)
         logger = logging.getLogger(__name__)
+        logger.setLevel(logging.DEBUG)
         handler = logging.StreamHandler()
         handler.setLevel(logging.DEBUG)
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(thread)d - %(message)s')
@@ -552,13 +636,13 @@ class Radio:
         logger.propagate = False
         return logger
 
-    def _debug(self, *args): # pragma: no cover
-        if self.logger is not None:
-            self.logger.debug(*args)
+    # def _debug(self, *args): # pragma: no cover
+    #     if self.logger is not None:
+    #         self.logger.debug(*args)
 
-    def _error(self, *args): # pragma: no cover
-        if self.logger is not None:
-            self.logger.error(*args)
+    # def _error(self, *args): # pragma: no cover
+    #     if self.logger is not None:
+    #         self.logger.error(*args)
 
     #
     # Radio interrupt handler
@@ -581,7 +665,7 @@ class Radio:
                     payload_length = 66
 
                 if not (self.promiscuousMode or target_id == self.address or target_id == RF69_BROADCAST_ADDR):
-                    self._debug("Ignore Interrupt")
+                    self.logger.debug("Ignore Interrupt")
                     self._intLock.release()
                     self.begin_receive()
                     return
@@ -594,23 +678,24 @@ class Radio:
                 rssi = self._readRSSI()
 
                 if ack_received:
-                    self._debug("Incoming ack from {}".format(sender_id))
+                    self.logger.info("Incoming ack from {}".format(sender_id))
                     # Record acknowledgement
                     with self._ackLock:
                         self.acks.setdefault(sender_id, 1)
                         self._ackLock.notify_all()
                 elif ack_requested:
-                    self._debug("replying to ack request")
+                    self.logger.info("Ack requested by {}".format(sender_id))
                 else:
-                    self._debug("Other ??")
+                    self.logger.debug("No ack requested or received")
 
                 # When message received
                 if not ack_received:
-                    self._debug("Incoming data packet")
+                    self.logger.info("Incoming data packet")
                     # self._packetQueue.put(
                     #     Packet(int(target_id), int(sender_id), int(rssi), list(data))
                     # )
                     with self._packetLock:
+                        self.logger.debug("Packet was {}".format(list(data)))
                         self._packets.append(
                             Packet(int(target_id), int(sender_id), int(rssi), list(data))
                         )
@@ -618,9 +703,11 @@ class Radio:
 
                 # Send acknowledgement if needed
                 if ack_requested and self.auto_acknowledge:
-                    self._debug("Sending an ack")
+                    self.logger.info("Sending an ack")
                     self._intLock.release()
+                    self.logger.debug("")
                     self.send_ack(sender_id)
+                    self.logger.debug("")
                     self.begin_receive()
                     return
 
@@ -628,6 +715,7 @@ class Radio:
                 self.begin_receive()
                 return
 
+        self.logger.debug("Got to the bottom")
         self._intLock.release()
 
 
