@@ -453,8 +453,8 @@ class Radio:
         # DIO0 is "Packet Sent"
         self._writeReg(REG_DIOMAPPING1, RF_DIOMAPPING1_DIO0_00)
 
-        if len(buff) > RF69_MAX_DATA_LEN:
-            buff = buff[0:RF69_MAX_DATA_LEN]
+        # if len(buff) > RF69_MAX_DATA_LEN:
+        #     buff = buff[0:RF69_MAX_DATA_LEN]
 
         ack = 0
         if sendACK:
@@ -463,9 +463,13 @@ class Radio:
             ack = 0x40
         with self._spiLock:
             if isinstance(buff, str):
-                self.spi.xfer2([REG_FIFO | 0x80, len(buff) + 3, toAddress, self.address, ack] + [int(ord(i)) for i in list(buff)])
+                # self.spi.xfer2([REG_FIFO | 0x80, len(buff) + 3, toAddress, self.address, ack] + [int(ord(i)) for i in list(buff)])
+                self.spi.xfer2([REG_FIFO | 0x80] + [int(ord(i)) for i in list(buff)])
+            elif isinstance(buff, bytes):
+                self.spi.xfer2([REG_FIFO | 0x80] + list(buff))
             else:
-                self.spi.xfer2([REG_FIFO | 0x80, len(buff) + 3, toAddress, self.address, ack] + buff)
+                # self.spi.xfer2([REG_FIFO | 0x80, len(buff) + 3, toAddress, self.address, ack] + buff)
+                self.spi.xfer2([REG_FIFO | 0x80] + buff)
 
         with self._sendLock:
             self._setMode(RF69_MODE_TX)
